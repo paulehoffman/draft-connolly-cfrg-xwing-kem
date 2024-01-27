@@ -1,6 +1,6 @@
 ---
-title: "X-Wing: general-purpose hybrid post-quantum KEM"
-abbrev: xwing
+title: "KC-1 hybrid KEM combiner, and X-Wing hybrid KEM"
+abbrev: KC-1 and X-wing
 category: info
 
 docname: draft-connolly-cfrg-xwing-kem-latest
@@ -86,18 +86,29 @@ Extendable-Output Functions'
 
 --- abstract
 
-This memo defines X-Wing, a general-purpose post-quantum/traditional
-hybrid key encapsulation mechanism (PQ/T KEM) built on X25519 and
+This memo defines KC-1, a hybrid key encapsulation mechanism (PQ/T KEM)
+that can be used to comine some types of classical and post-quantum KEMs.
+This memo also defines X-Wing, a KEM based on KC-1 and built on X25519 and
 ML-KEM-768.
 
 --- middle
 
 # Introduction {#intro}
 
-## Warning: ML-KEM-768 has not been standardised
+KC-1 is a KEM combiner that works with some specific types of KEMs to create
+a hybrid KEM.
+It is designed to combine a classical elliptic curve algorithm with a
+Fujisaki-Okamoto transformation KEM that uses a post-quantum algorithm.
+KC-1 is not a generic KEM combiner: in order for it to maintain its security
+properties, appropriate types of KEMs and key lengths MUST be used.
 
-X-Wing uses ML-KEM-768, which has not been standardised yet. Thus X-Wing
-is not finished, yet, and should not be used, yet.
+X-Wing is a KEM that uses KC-1 as a KEM combiner, and uses ML-KEM-768 {{MLKEM}}
+(which has not yet been standardised) and X25519 {{Section 5 of RFC7748}}.
+It is defined in {{xwing_appendix}}.
+
+Neither KC-1 nor X-Wing are finished, and thus should not be used in production.
+This current version of the specification is hopefully sufficient for
+pre-production code creation, testing, and research.
 
 ## Motivation {#motivation}
 
@@ -106,36 +117,29 @@ the constituent KEMs; their security levels; the combiner; and the hash
 within, to name but a few. Having too many similar options are a burden
 to the ecosystem.
 
-The aim of X-Wing is to provide a concrete, simple choice for
+The aim of KC-1 and X-Wing is to provide a concrete, simple choice for
 post-quantum hybrid KEM, that should be suitable for the vast majority
 of use cases.
 
 ## Design goals {#goals}
 
 By making concrete choices, we can simplify and improve many aspects of
-X-Wing.
+KC-1.
 
 * Simplicity of definition. Because all shared secrets and cipher texts
   are fixed length, we do not need to encode the length. Using SHA3-256,
-  we do not need HMAC-based construction. For the concrete choice of
-  ML-KEM-768, we do not need to mix in its ciphertext, see {{secc}}.
+  we do not need HMAC-based construction for KC-1.
+  With a PQC KEM that has IND-CCA security \*\*\*(or is it FO security?)\*\*\*
+  we do not need to mix in its ciphertext in KC-1, see {{secc}}.
 
-* Security analysis. Because ML-KEM-768 already assumes QROM, we do not
-  need to complicate the analysis of X-Wing by considering stronger
+* Security analysis. With a PQC KEM that meets QROM, we do not
+  need to complicate the analysis of KC-1 by considering stronger
   models.
 
-* Performance. Not having to mix in the ML-KEM-768 ciphertext is a nice
-  performance benefit. Furthermore, by using SHA3-256 in the combiner,
-  which matches the hashing in ML-KEM-768, this hash can be computed in
+* Performance. Not having to mix in the PQC KEM's ciphertext is a nice
+  performance benefit. Furthermore, if the PCK KEM's hashing uses SHA3-256,
+  the hash can be computed in
   one go on platforms where two-way Keccak is available.
-
-We aim for "128 bits" security (NIST PQC level 1). Although at the
-moment there is no peer-reviewed evidence that ML-KEM-512 does not reach
-this level, we would like to hedge against future cryptanalytic
-improvements, and feel ML-KEM-768 provides a comfortable margin.
-
-We aim for X-Wing to be usable for most applications, including
-specifically HPKE {{RFC9180}}.
 
 ## Not an interactive key-agreement
 
@@ -148,8 +152,285 @@ straight-forward manner by a plain KEM.
 
 ## Not an authenticated KEM {#auth}
 
-In particular, X-Wing is not, borrowing the language of {{RFC9180}}, an
+In particular, KC-1 is not, borrowing the language of {{RFC9180}}, an
 *authenticated* KEM.
+
+
+# Requirements Notation
+
+{::boilerplate bcp14-tagged}
+
+# Conventions and Definitions
+
+This document is consistent with all terminology defined in
+{{I-D.driscoll-pqt-hybrid-terminology}}.
+
+The following terms are used throughout this document to describe the
+operations, roles, and behaviors of HPKE:
+
+- `concat(x0, ..., xN)`: returns the concatenation of byte
+  strings. `concat(0x01, 0x0203, 0x040506) = 0x010203040506`.
+- `random(n)`: return a pseudorandom byte string of length `n` bytes produced by
+  a cryptographically-secure random number generator.
+
+# Cryptographic Dependencies {#base-crypto}
+
+KC-1 relies on the primitives given here.
+In the primitive name, `KC-1-PQC` indicates the PQC KEM that is being combined.
+and `KC-1-C` indicates the classical KEM that is being combined.
+
+* PQC KEM:
+
+  - `KC-1-PQC.KeyGen()`: Randomized algorithm to generate an
+    KC-1-PQC key pair `(pk_PQC, sk_PQC)` of an encapsulation key `pk_PQC`
+    and decapsulation key `sk_PQC`.
+    The length of `pk_PQC` MUST be 960 bytes or longer.
+    Note that `KC-1-PQC.KeyGen()` returns the keys in reverse
+    order of `GenerateKeyPair()` defined below.
+  - `KC-1-PQC.Encaps(pk_PQC)`: Randomized algorithm to generate `(ss_PQC,
+    ct_PQC)`, an ephemeral 32 byte shared key `ss_PQC`, and a fixed-length
+    encapsulation (ciphertext) of that key `ct_PQC` for encapsulation key
+    `pk_PQC`.
+  - `KC-1-PQC.Decap(ct_PQC, sk_PQC)`: Deterministic algorithm using the
+    decapsulation key `sk_PQC` to recover the shared key from `ct_PQC`.
+
+  To generate deterministic test vectors, we also use
+
+  - `KC-1-PQC.KeyGenDerand(seed)`: Same as `KC-1-PQC.KeyGen()`,
+    but derandomized as follows.
+    `seed` is 64 bytes. `seed[0:32]` is used for `z` (line 1 algorithm 15),
+    and `seed[32:64]` is used for `d` (line 1 algorithm 12).
+  - `KC-1-PQC.EncapsDerand(pk_PQC, seed)`: Same as `KC-1-PQC.Encaps()`
+    but derandomized as follows.
+    `seed` is 32 bytes and used for `m` (line 1 algorithm 16).
+
+* X25519 elliptic curve Diffie-Hellman key-exchange defined in {{Section 5 of RFC7748}}:
+
+  - `KC-1-C(k,u)`: takes 32 byte strings k and u representing a
+    Curve25519 scalar and curvepoint respectively, and returns
+    the 32 byte string representing their scalar multiplication.
+  - `KC-1-C_BASE`: the 32 byte string representing the standard base point
+    of the underlying curve.
+
+Note that 9 is the standard basepoint for X25519, cf {{Section 6.1 of RFC7748}}.
+
+
+* Symmetric cryptography.
+
+  - `SHAKE128(message, outlen)`: The extendable-output function (XOF)
+    defined in Section 6.2 of {{FIPS202}}.
+  - `SHA3-256(message)`: The hash defined in
+    defined in Section 6.1 of {{FIPS202}}.
+
+
+# KC-1 Construction
+
+## Encoding and sizes
+
+KC-1 encapsulation key, decapsulation key, ciphertexts and shared secrets are all
+fixed length byte strings.
+
+## Key generation
+
+An KC-1 keypair (decapsulation key, encapsulation key) is generated as
+follows.
+
+~~~
+def GenerateKeyPair():
+  (pk_PQC, sk_PQC) = KC-1-PQC.KeyGen()
+  sk_CLA = random(32)
+  pk_CLA = KC-1-C(sk_CLA, KC-1-C_BASE)
+  return concat(sk_PQC, sk_CLA, pk_CLA), concat(pk_PQC, pk_CLA)
+~~~
+
+`GenerateKeyPair()` returns the secret encapsulation key `sk`
+and the decapsulation key `pk`.
+
+### Key derivation {#derive-key-pair}
+
+For testing, it is convenient to have a deterministic version
+of key generation. A KC-1 implementation MAY provide the following
+derandomized variant of key generation.
+
+~~~
+def GenerateKeyPairDerand(seed):
+  (pk_PQC, sk_PQC) = KC-1-PQC.KeyGenDerand(seed[0:64])
+  sk_CLA = seed[64:96]
+  pk_CLA = KC-1-C(sk_CLA, KC-1-C_BASE)
+  return concat(sk_PQC, sk_CLA, pk_CLA), concat(pk_PQC, pk_CLA)
+~~~
+
+`seed` must be 96 bytes.
+
+`GenerateKeyPairDerand()` returns the secret encapsulation key
+`sk` and the decapsulation key `pk`.
+
+## Combiner {#combiner}
+
+Given 32 byte strings `ss_PQC`, `ss_CLA`, `ct_CLA`, `pk_CLA`, representing the
+PQC KEM shared secret, classical KEM shared secret, classical KEM ciphertext
+(ephemeral public key) and classical KEM public key respectively, the 32 byte
+combined shared secret is given by:
+
+~~~
+def Combiner(ss_PQC, ss_CLA, ct_CLA, pk_CLA):
+  return SHA3-256(concat(
+    KC-1-Label,
+    ss_PQC,
+    ss_CLA,
+    ct_CLA,
+    pk_CLA
+  ))
+~~~
+
+where KC-1-Label is a six-byte value that SHOULD be different for each
+defined combination of classical and PQC KEM.
+
+## Encapsulation {#encaps}
+
+Given a KC-1 encapsulation key `pk`, encapsulation proceeds as follows.
+`pk_LEN` is the length of `pk` in bytes.
+
+~~~
+def Encapsulate(pk):
+  pk_PQC = pk[0:1184]
+  pk_CLA = pk[1184:pk_LEN]
+  ek_CLA = random(32)
+  ct_CLA = KC-1-C(ek_CLA, KC-1-C_BASE)
+  ss_CLA = KC-1-C(ek_CLA, pk_CLA)
+  (ss_PQC, ct_PQC) = KC-1-PQC.Encaps(pk_PQC)
+  ss = Combiner(ss_PQC, ss_CLA, ct_CLA, pk_CLA)
+  ct = concat(ct_PQC, ct_CLA)
+  return (ss, ct)
+~~~
+
+`pk` is a KC-1 encapsulation key resulting from `GeneratePublicKey()`
+
+`Encapsulate()` returns the 32 byte shared secret `ss` and the 1120 byte
+ciphertext `ct`.
+
+### Derandomized
+
+For testing, it is convenient to have a deterministic version
+of encapsulation. A KC-1 implementation MAY provide
+the following derandomized function.
+
+~~~
+def EncapsulateDerand(pk, seed):
+  pk_PQC = pk[0:1184]
+  pk_CLA = pk[1184:pk_LEN]
+  ek_CLA = seed[32:64]
+  ct_CLA = KC-1-C(ek_CLA, KC-1-C_BASE)
+  ss_CLA = KC-1-C(ek_CLA, pk_CLA)
+  (ss_PQC, ct_PQC) = KC-1-PQC.EncapsDerand(pk_PQC, seed[0:32])
+  ss = Combiner(ss_PQC, ss_CLA, ct_CLA, pk_CLA)
+  ct = concat(ct_PQC, ct_CLA)
+  return (ss, ct)
+~~~
+
+`pk` is a KC-1 encapsulation key resulting from `GeneratePublicKey()`
+`seed` MUST be 64 bytes.
+
+`EncapsulateDerand()` returns the 32 byte shared secret `ss` and the 1120 byte
+ciphertext `ct`.
+
+
+## Decapsulation {#decaps}
+
+~~~
+def Decapsulate(ct, sk):
+  ct_PQC = ct[0:1088]
+  ct_CLA = ct[1088:pk_LEN]
+  sk_PQC = sk[0:2400]
+  sk_CLA = sk[2400:2432]
+  pk_CLA = sk[2432:2464]
+  ss_PQC = KC-1-PQC.Decapsulate(ct_PQC, sk_PQC)
+  ss_CLA = KC-1-C(sk_CLA, ct_CLA)
+  return Combiner(ss_PQC, ss_CLA, ct_CLA, pk_CLA)
+~~~
+
+`ct` is the ciphertext resulting from `Encapsulate()`
+`sk` is a KC-1 decapsulation key resulting from `GenerateKeyPair()`
+
+`Decapsulate()` returns the 32 byte shared secret.
+
+## Use in HPKE
+
+KC-1 satisfies the HPKE KEM interface as follows.
+
+The `SerializePublicKey`, `DeserializePublicKey`,
+`SerializePrivateKey` and `DeserializePrivateKey` are the identity functions,
+as KC-1 keys are fixed-length byte strings.
+
+`DeriveKeyPair()` is given by
+
+~~~
+def DeriveKeyPair(ikm):
+  return GenerateKeyPairDerand(SHAKE128(ikm, 96))
+~~~
+
+where the HPKE private key and public key are the KC-1 decapsulation
+key and encapsulation key respectively.
+
+The argument `ikm` to `DeriveKeyPair()` SHOULD be at least 32 octets in
+length.  (This is contrary to {{RFC9180}} which stipulates it should be
+at least Nsk=2432 octets in length.)
+
+`Encap()` is `Encapsulate()` from {{encaps}}.
+
+`Decap()` is `Decapsulate()` from {{decaps}}.
+
+KC-1 is not an authenticated KEM: it does not support `AuthEncap()`
+and `AuthDecap()`, see {{auth}}.
+
+## Use in TLS 1.3
+
+For the client's share, the key_exchange value contains
+the KC-1 encapsulation key.
+
+For the server's share, the key_exchange value contains
+the KC-1 ciphertext.
+
+# Security Considerations {#secc}
+
+Informally, KC-1 is secure if SHA3 is secure, and either of the KEMs combined by KC-1 is secure
+
+More precisely, if SHA3-256, SHA3-512, SHAKE-128, and SHAKE-256 may be
+modelled as a random oracle, then the IND-CCA security of KC-1 is
+bounded by the IND-CCA security of the PQC KEM, and the gap-CDH security
+of the classical curve, see {{PROOF}}.
+
+The security of KC-1 relies crucially on the specifics of the
+Fujisaki-Okamoto transformation used in PCC KEM.  In particular, KC-1
+cannot be assumed to be secure, when used with KEMs that do not meet the
+stated requiremnts
+
+# IANA Considerations
+
+KC-1 does not require any IANA registrations.
+However, instantiations of KC-1, such as that given in {{xwing_appendix}},
+may have IANA registrations.
+
+
+# TODO
+
+- Which validation do we want to require?
+
+
+--- back
+
+# Specification of X-Wing {#xwing_appendix}
+
+X-Wing is a KEM that uses KC-1 as a KEM combiner, and uses ML-KEM-768 {{MLKEM}}
+(which has not yet been standardised) and X25519 {{Section 5 of RFC7748}}.
+
+X-Wing aims for "128 bits" security (NIST PQC level 1). Although at the
+moment there is no peer-reviewed evidence that ML-KEM-512 does not reach
+this level, we would like to hedge against future cryptanalytic
+improvements, and feel ML-KEM-768 provides a comfortable margin.
+
+We aim for X-Wing to be usable for most applications, including
+specifically HPKE {{RFC9180}}.
 
 ## Comparisons
 
@@ -186,75 +467,13 @@ security, but:
 
 * X-Wing does not accept the optional counter and fixedInfo arguments.
 
-# Requirements Notation
 
-{::boilerplate bcp14-tagged}
-
-# Conventions and Definitions
-
-This document is consistent with all terminology defined in
-{{I-D.driscoll-pqt-hybrid-terminology}}.
-
-The following terms are used throughout this document to describe the
-operations, roles, and behaviors of HPKE:
-
-- `concat(x0, ..., xN)`: returns the concatenation of byte
-  strings. `concat(0x01, 0x0203, 0x040506) = 0x010203040506`.
-- `random(n)`: return a pseudorandom byte string of length `n` bytes produced by
-  a cryptographically-secure random number generator.
-
-# Cryptographic Dependencies {#base-crypto}
-
-X-Wing relies on the following primitives:
-
-
-* ML-KEM-768 post-quantum key-encapsulation mechanism (KEM) {{MLKEM}}:
-
-  - `ML-KEM-768.KeyGen()`: Randomized algorithm to generate an
-    ML-KEM-768 key pair `(pk_M, sk_M)` of an encapsulation key `pk_M`
-    and decapsulation key `sk_M`.
-    Note that `ML-KEM-768.KeyGen()` returns the keys in reverse
-    order of `GenerateKeyPair()` defined below.
-  - `ML-KEM-768.Encaps(pk_M)`: Randomized algorithm to generate `(ss_M,
-    ct_M)`, an ephemeral 32 byte shared key `ss_M`, and a fixed-length
-    encapsulation (ciphertext) of that key `ct_M` for encapsulation key
-    `pk_M`.
-  - `ML-KEM-768.Decap(ct_M, sk_M)`: Deterministic algorithm using the
-    decapsulation key `sk_M` to recover the shared key from `ct_M`.
-
-  To generate deterministic test vectors, we also use
-
-  - `ML-KEM-768.KeyGenDerand(seed)`: Same as `ML-KEM-768.KeyGen()`,
-    but derandomized as follows.
-    `seed` is 64 bytes. `seed[0:32]` is used for `z` (line 1 algorithm 15),
-    and `seed[32:64]` is used for `d` (line 1 algorithm 12).
-  - `ML-KEM-768.EncapsDerand(pk_M, seed)`: Same as `ML-KEM-768.Encaps()`
-    but derandomized as follows.
-    `seed` is 32 bytes and used for `m` (line 1 algorithm 16).
-
-* X25519 elliptic curve Diffie-Hellman key-exchange defined in {{Section 5 of RFC7748}}:
-
-  - `X25519(k,u)`: takes 32 byte strings k and u representing a
-    Curve25519 scalar and curvepoint respectively, and returns
-    the 32 byte string representing their scalar multiplication.
-  - `X25519_BASE`: the 32 byte string representing the standard base point
+  - `KC-1-C_BASE`: the 32 byte string representing the standard base point
     of Curve25519. In hex
     it is given by `09000000000000000000000000000000000000000000`.
 
-Note that 9 is the standard basepoint for X25519, cf {{Section 6.1 of RFC7748}}.
 
-
-* Symmetric cryptography.
-
-  - `SHAKE128(message, outlen)`: The extendable-output function (XOF)
-    defined in Section 6.2 of {{FIPS202}}.
-  - `SHA3-256(message)`: The hash defined in
-    defined in Section 6.1 of {{FIPS202}}.
-
-
-# X-Wing Construction
-
-## Encoding and sizes {#encoding}
+## Encoding and sizes
 
 X-Wing encapsulation key, decapsulation key, ciphertexts and shared secrets are all
 fixed length byte strings.
@@ -271,190 +490,18 @@ fixed length byte strings.
  Shared secret:
  : 32 bytes
 
-## Key generation
-
-An X-Wing keypair (decapsulation key, encapsulation key) is generated as
-follows.
+In the definition of Combiner(), the `KC-1-Label` for X-Wing is
+the following 6 byte ASCII string
 
 ~~~
-def GenerateKeyPair():
-  (pk_M, sk_M) = ML-KEM-768.KeyGen()
-  sk_X = random(32)
-  pk_X = X25519(sk_X, X25519_BASE)
-  return concat(sk_M, sk_X, pk_X), concat(pk_M, pk_X)
-~~~
-
-`GenerateKeyPair()` returns the 2464 byte secret encapsulation key `sk`
-and the 1216 byte decapsulation key `pk`.
-
-### Key derivation {#derive-key-pair}
-
-For testing, it is convenient to have a deterministic version
-of key generation. An X-Wing implementation MAY provide the following
-derandomized variant of key generation.
-
-~~~
-def GenerateKeyPairDerand(seed):
-  (pk_M, sk_M) = ML-KEM-768.KeyGenDerand(seed[0:64])
-  sk_X = seed[64:96]
-  pk_X = X25519(sk_X, X25519_BASE)
-  return concat(sk_M, sk_X, pk_X), concat(pk_M, pk_X)
-~~~
-
-`seed` must be 96 bytes.
-
-`GenerateKeyPairDerand()` returns the 2464 byte secret encapsulation key
-`sk` and the 1216 byte decapsulation key `pk`.
-
-## Combiner {#combiner}
-
-Given 32 byte strings `ss_M`, `ss_X`, `ct_X`, `pk_X`, representing the
-ML-KEM-768 shared secret, X25519 shared secret, X25519 ciphertext
-(ephemeral public key) and X25519 public key respectively, the 32 byte
-combined shared secret is given by:
-
-~~~
-def Combiner(ss_M, ss_X, ct_X, pk_X):
-  return SHA3-256(concat(
-    XWingLabel,
-    ss_M,
-    ss_X,
-    ct_X,
-    pk_X
-  ))
-~~~
-
-where XWingLabel is the following 6 byte ASCII string
-
-~~~
-XWingLabel = concat(
+concat(
     "\./",
     "/^\",
 )
 ~~~
 
-## Encapsulation {#encaps}
 
-Given an X-Wing encapsulation key `pk`, encapsulation proceeds as follows.
-
-~~~
-def Encapsulate(pk):
-  pk_M = pk[0:1184]
-  pk_X = pk[1184:1216]
-  ek_X = random(32)
-  ct_X = X25519(ek_X, X25519_BASE)
-  ss_X = X25519(ek_X, pk_X)
-  (ss_M, ct_M) = ML-KEM-768.Encaps(pk_M)
-  ss = Combiner(ss_M, ss_X, ct_X, pk_X)
-  ct = concat(ct_M, ct_X)
-  return (ss, ct)
-~~~
-
-`pk` is a 1216 byte X-Wing encapsulation key resulting from `GeneratePublicKey()`
-
-`Encapsulate()` returns the 32 byte shared secret `ss` and the 1120 byte
-ciphertext `ct`.
-
-### Derandomized
-
-For testing, it is convenient to have a deterministic version
-of encapsulation. An X-Wing implementation MAY provide
-the following derandomized function.
-
-~~~
-def EncapsulateDerand(pk, seed):
-  pk_M = pk[0:1184]
-  pk_X = pk[1184:1216]
-  ek_X = seed[32:64]
-  ct_X = X25519(ek_X, X25519_BASE)
-  ss_X = X25519(ek_X, pk_X)
-  (ss_M, ct_M) = ML-KEM-768.EncapsDerand(pk_M, seed[0:32])
-  ss = Combiner(ss_M, ss_X, ct_X, pk_X)
-  ct = concat(ct_M, ct_X)
-  return (ss, ct)
-~~~
-
-`pk` is a 1216 byte X-Wing encapsulation key resulting from `GeneratePublicKey()`
-`seed` MUST be 64 bytes.
-
-`EncapsulateDerand()` returns the 32 byte shared secret `ss` and the 1120 byte
-ciphertext `ct`.
-
-
-## Decapsulation {#decaps}
-
-~~~
-def Decapsulate(ct, sk):
-  ct_M = ct[0:1088]
-  ct_X = ct[1088:1120]
-  sk_M = sk[0:2400]
-  sk_X = sk[2400:2432]
-  pk_X = sk[2432:2464]
-  ss_M = ML-KEM-768.Decapsulate(ct_M, sk_M)
-  ss_X = X25519(sk_X, ct_X)
-  return Combiner(ss_M, ss_X, ct_X, pk_X)
-~~~
-
-`ct` is the 1120 byte ciphertext resulting from `Encapsulate()`
-`sk` is a 2464 byte X-Wing decapsulation key resulting from `GenerateKeyPair()`
-
-`Decapsulate()` returns the 32 byte shared secret.
-
-## Use in HPKE
-
-X-Wing satisfies the HPKE KEM interface as follows.
-
-The `SerializePublicKey`, `DeserializePublicKey`,
-`SerializePrivateKey` and `DeserializePrivateKey` are the identity functions,
-as X-Wing keys are fixed-length byte strings, see {{encoding}}.
-
-`DeriveKeyPair()` is given by
-
-~~~
-def DeriveKeyPair(ikm):
-  return GenerateKeyPairDerand(SHAKE128(ikm, 96))
-~~~
-
-where the HPKE private key and public key are the X-Wing decapsulation
-key and encapsulation key respectively.
-
-The argument `ikm` to `DeriveKeyPair()` SHOULD be at least 32 octets in
-length.  (This is contrary to {{RFC9180}} which stipulates it should be
-at least Nsk=2432 octets in length.)
-
-`Encap()` is `Encapsulate()` from {{encaps}}.
-
-`Decap()` is `Decapsulate()` from {{decaps}}.
-
-X-Wing is not an authenticated KEM: it does not support `AuthEncap()`
-and `AuthDecap()`, see {{auth}}.
-
-Nsecret, Nenc, Npk, and Nsk are defined in {{iana}}.
-
-## Use in TLS 1.3
-
-For the client's share, the key_exchange value contains
-the X-Wing encapsulation key.
-
-For the server's share, the key_exchange value contains
-the X-Wing ciphertext.
-
-# Security Considerations {#secc}
-
-Informally, X-Wing is secure if SHA3 is secure, and either X25519 is
-secure, or ML-KEM-768 is secure.
-
-More precisely, if SHA3-256, SHA3-512, SHAKE-128, and SHAKE-256 may be
-modelled as a random oracle, then the IND-CCA security of X-Wing is
-bounded by the IND-CCA security of ML-KEM-768, and the gap-CDH security
-of Curve25519, see {{PROOF}}.
-
-The security of X-Wing relies crucially on the specifics of the
-Fujisaki-Okamoto transformation used in ML-KEM-768.  In particular, the
-X-Wing combiner cannot be assumed to be secure, when used with different
-KEMs.
-
-# IANA Considerations {#iana}
+## IANA for X-Wing Considerations
 
 This document requests/registers a new entry to the "HPKE KEM Identifiers"
 registry.
@@ -506,14 +553,9 @@ in {{Section 6 of TLSIANA}}.
  : PQ/T hybrid of X25519 and ML-KEM-768
 
 
-# TODO
+## Test Vectors
 
-- Which validation do we want to require?
-
-
---- back
-
-# Test vectors # TODO: replace with test vectors that re-use ML-KEM, X25519 values
+\# TODO: replace with test vectors that re-use ML-KEM, X25519 values
 
 ~~~
 seed
@@ -972,3 +1014,4 @@ TODO acknowledge.
 - A copy of the X25519 public key is now included in the X-Wing
   decapsulation (private) key, so that decapsulation does not
   require separate access to the X-Wing public key. See #2.
+
